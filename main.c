@@ -162,7 +162,10 @@ static int start_curses(void)
   meta(stdscr, true);
 #endif
   init_extended_keys();
-  mutt_window_reflow();
+  /* Now that curses is set up, we drop back to normal screen mode.
+   * This simplifies displaying error messages to the user.
+   * The first call to refresh() will swap us back to curses screen mode. */
+  endwin();
   return 0;
 }
 
@@ -178,10 +181,9 @@ static int start_curses(void)
 /**
  * get_user_info - Find the user's name, home and shell
  * @param cs Config Set
- * @retval 0 Success
- * @retval 1 Error
+ * @retval true Success
  */
-static int get_user_info(void)
+bool get_user_info(struct ConfigSet *cs)
 {
   const char *p = mutt_str_getenv("HOME");
   if (p)
@@ -212,13 +214,13 @@ static int get_user_info(void)
   if (!Username)
   {
     mutt_error(_("unable to determine username"));
-    return 1; // TEST05: neomutt (unset $USER, delete user from /etc/passwd)
+    return false; // TEST05: neomutt (unset $USER, delete user from /etc/passwd)
   }
 
   if (!HomeDir)
   {
     mutt_error(_("unable to determine home directory"));
-    return 1; // TEST06: neomutt (unset $HOME, delete user from /etc/passwd)
+    return false; // TEST06: neomutt (unset $HOME, delete user from /etc/passwd)
   }
 
   if (!Shell)
@@ -229,7 +231,10 @@ static int get_user_info(void)
     Shell = mutt_str_strdup(p);
   }
 
-  return 0;
+  cs_str_initial_set(cs, "realname", RealName, NULL);
+  cs_str_initial_set(cs, "shell", Shell, NULL);
+
+  return true;
 }
 
 /**
@@ -304,7 +309,6 @@ int main(int argc, char *argv[], char *envp[])
   umask(077);
 
   mutt_envlist_init(envp);
-
   for (optind = 1; optind < double_dash;)
   {
     /* We're getopt'ing POSIXLY, so we'll be here every time getopt()
@@ -446,21 +450,22 @@ int main(int argc, char *argv[], char *envp[])
     goto main_ok; // TEST04: neomutt -v
   }
 
-  if (get_user_info() != 0)
-  {
+  if (!init_config())
+    goto main_curses;
+
+  if (!get_user_info(Config))
     goto main_exit;
-  }
 
   if (dfile)
   {
-    set_default_value("debug_file", (intptr_t) mutt_str_strdup(dfile));
-    mutt_str_replace(&DebugFile, dfile);
+    cs_str_initial_set(Config, "debug_file", dfile, NULL);
+    cs_str_reset(Config, "debug_file", NULL);
   }
   else
   {
     /* Make sure that the DebugFile has a value */
     LogAllowDebugSet = true;
-    reset_value("debug_file");
+    cs_str_reset(Config, "debug_file", NULL);
     LogAllowDebugSet = false;
   }
 
@@ -472,8 +477,8 @@ int main(int argc, char *argv[], char *envp[])
       mutt_error(_("Error: value '%s' is invalid for -d."), dlevel);
       goto main_exit; // TEST07: neomutt -d xyz
     }
-    set_default_value("debug_level", (intptr_t) num);
-    DebugLevel = num;
+    cs_str_initial_set(Config, "debug_level", dlevel, NULL);
+    cs_str_reset(Config, "debug_level", NULL);
   }
 
   if (dlevel)
@@ -522,27 +527,24 @@ int main(int argc, char *argv[], char *envp[])
   if (!OptNoCurses)
   {
     int crc = start_curses();
-    /* Now that curses is set up, we drop back to normal screen mode.
-     * This simplifies displaying error messages to the user.
-     * The first call to refresh() will swap us back to curses screen mode. */
-    endwin();
 
     if (crc != 0)
       goto main_curses; // TEST08: can't test -- fake term?
 
     /* check whether terminal status is supported (must follow curses init) */
     TsSupported = mutt_ts_capability();
+    mutt_window_reflow();
   }
 
   /* set defaults and read init files */
   if (mutt_init(flags & MUTT_NOSYSRC, &commands) != 0)
     goto main_curses;
 
-  /* The command line overrides the config */
+    /* The command line overrides the config */
   if (dlevel)
-    reset_value("debug_level");
+    cs_str_reset(Config, "debug_level", NULL);
   if (dfile)
-    reset_value("debug_file");
+    cs_str_reset(Config, "debug_file", NULL);
 
   if (mutt_log_start() < 0)
   {
@@ -558,17 +560,17 @@ int main(int argc, char *argv[], char *envp[])
   /* "$news_server" precedence: command line, environment, config file, system file */
   const char *env_nntp = NULL;
   if (cli_nntp)
-    mutt_str_replace(&NewsServer, cli_nntp);
+    cs_str_string_set(Config, "news_server", cli_nntp, NULL);
   else if ((env_nntp = mutt_str_getenv("NNTPSERVER")))
-    mutt_str_replace(&NewsServer, env_nntp);
+    cs_str_string_set(Config, "news_server", env_nntp, NULL);
   else if (!NewsServer)
   {
     char buffer[1024];
     char *server = mutt_file_read_keyword(SYSCONFDIR "/nntpserver", buffer, sizeof(buffer));
-    NewsServer = mutt_str_strdup(server);
+    cs_str_string_set(Config, "news_server", server, NULL);
   }
   if (NewsServer)
-    set_default_value("news_server", (intptr_t) mutt_str_strdup(NewsServer));
+    cs_str_initial_set(Config, "news_server", NewsServer, NULL);
 #endif
 
   /* Initialize crypto backends.  */
@@ -591,7 +593,8 @@ int main(int argc, char *argv[], char *envp[])
 
   if (dump_variables)
   {
-    rc = mutt_dump_variables(hide_sensitive);
+    //QWQ retval
+    dump_config(Config, CS_DUMP_STYLE_MUTT, hide_sensitive ? CS_DUMP_HIDE_SENSITIVE : 0);
     goto main_curses; // TEST18: neomutt -D
   }
 
@@ -1053,6 +1056,7 @@ int main(int argc, char *argv[], char *envp[])
 #endif
     log_queue_empty();
     mutt_log_stop();
+    cs_free(&Config);
     mutt_window_free();
     // TEST43: neomutt (no change to mailbox)
     // TEST44: neomutt (change mailbox)
@@ -1071,5 +1075,6 @@ main_exit:
   mutt_envlist_free();
   mutt_free_opts();
   mutt_free_keys();
+  cs_free(&Config);
   return rc;
 }
