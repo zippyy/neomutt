@@ -669,14 +669,12 @@ int mutt_ch_check(const char *s, size_t slen, const char *from, const char *to)
   int rc = 0;
   iconv_t cd = mutt_ch_iconv_open(to, from, 0);
   if (cd == (iconv_t)-1)
-  {
     return -1;
-  }
 
   const size_t outlen = MB_LEN_MAX * slen;
   char *out = mutt_mem_malloc(outlen + 1);
 
-  const size_t convlen = iconv(cd, &s, &slen, &out, &outlen);
+  const size_t convlen = iconv(cd, (ICONV_CONST char **) &s, &slen, &out, &outlen);
   if (convlen == -1)
     rc = errno;
 
